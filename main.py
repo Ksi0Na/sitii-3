@@ -111,12 +111,11 @@ def avg_events_and_crit_by_os(df: pd.DataFrame):
     Average number of events and criticality by operating system types.
 
     Parameters:
-    - file_path: str, path to the CSV file.
+    - df: pd.DataFrame, the original DataFrame.
 
     Returns:
     - None.
     """
-    df = pd.read_csv(file_path)
     df['assets_id'] = df.assets_id.apply(literal_eval)
     df = df.explode('assets_id')
 
@@ -193,8 +192,8 @@ def correlation_table(df: pd.DataFrame, info) -> None:
                 users_levels.append(user_access_levels.get(user, 0))
         return sum(users_levels) / len(users_levels) if users_levels else 0
 
-    # Применить к каждому элементу списка assets_id функцию literal_eval
-    df['assets_id'] = df.assets_id.apply(literal_eval)
+    # Применить к каждому элементу списка assets_id функцию ast.literal_eval
+    df['assets_id'] = df.assets_id.apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
 
     # Создать новый столбец 'user_access_levels_mean'
     df['user_access_levels_mean'] = df.assets_id.apply(get_level_access_by_asset_id)
@@ -202,15 +201,15 @@ def correlation_table(df: pd.DataFrame, info) -> None:
     # Сгруппировать по типу инцидента и вычислить корреляции
     corr_df = df.groupby('type')[['events_count', 'crit_rate', 'user_access_levels_mean']].corr(method='pearson')
 
-    # Вывести корреляционную таблицу
-    print("Таблица корреляций:")
-    print(corr_df)
-
     # Удалить строки с корреляцией -1 и 1
     corr_df = corr_df[
         (corr_df['user_access_levels_mean'] != -1.0) &
         (corr_df['user_access_levels_mean'] != 1.0)
-    ]
+        ]
+
+    # Вывести корреляционную таблицу
+    print("Таблица корреляций:")
+    print(corr_df)
 
     # Найти максимальное абсолютное значение корреляции
     max_correlation_with_user_access = corr_df['user_access_levels_mean'].abs().max()
@@ -228,7 +227,7 @@ def correlation_table(df: pd.DataFrame, info) -> None:
 if __name__ == '__main__':
     file_path = 'data/incidents.csv'
     df = read_data(file_path)
-    save_assets(df)
+    # save_assets(df)
     describe_data(df)
     attack_type_distribution(df)
 
@@ -238,8 +237,5 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_colwidth', None)
     correlation_table(df, info)
-
-
-
 
     # print(df)
