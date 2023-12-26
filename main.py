@@ -1,5 +1,7 @@
 import pandas as pd
 import explorator
+import requests
+from ast import literal_eval
 
 
 def read_data(file_path: str) -> pd.DataFrame:
@@ -16,7 +18,7 @@ def read_data(file_path: str) -> pd.DataFrame:
     return df
 
 
-def save_info_df(df: pd.DataFrame) -> None:
+def save_assets(df: pd.DataFrame) -> None:
     """
     Save general information about the DataFrame to a CSV file.
 
@@ -27,7 +29,7 @@ def save_info_df(df: pd.DataFrame) -> None:
     - None.
     """
     df_info = explorator.general_info.get_total(df)
-    output_file_path = 'data/info_db.csv'
+    output_file_path = 'data/assets.csv'
     df_info.to_csv(output_file_path, index=False)
 
 
@@ -86,22 +88,54 @@ def attack_type_distribution(df: pd.DataFrame) -> None:
     print(attack_distribution)
 
 
-def avg_events_and_crit_by_os(df: pd.DataFrame) -> None:
+def get_assets_os(a):
+    """
+    Get information about assets from the server.
+
+    Parameters:
+    - a: list, list of asset ids.
+
+    Returns:
+    - data: List of dictionaries containing asset information.
+    """
+    resp = requests.get('https://d5d9e0b83lurt901t9ue.apigw.yandexcloud.net/get-assets-by-id',
+                        params={'assets-id': ','.join(map(str, a))})
+    resp.raise_for_status()
+
+    data = resp.json().get("result", [])
+    return data
+
+
+def avg_events_and_crit_by_os(df: pd.DataFrame):
     """
     Average number of events and criticality by operating system types.
 
     Parameters:
-    - df: pd.DataFrame, the original DataFrame.
+    - file_path: str, path to the CSV file.
 
     Returns:
     - None.
     """
-    grouped_data = df.groupby('assets_id')
-    average_data = grouped_data.agg({'events_count': 'mean', 'crit_rate': 'mean'})
+    df = pd.read_csv(file_path)
+    df['assets_id'] = df.assets_id.apply(literal_eval)
+    df = df.explode('assets_id')
+
+    list_unique = list(df['assets_id'].unique())
+    info_1 = get_assets_os(list_unique[:len(list_unique) // 2])
+    info_2 = get_assets_os(list_unique[len(list_unique) // 2:])
+    info = info_1 + info_2
+
+    def get_os(id):
+        result = [x for x in info if x.get('id') == int(id)]
+        return result[0]['os'] if result else None  # Возвращаем None, если список result пуст
+
+    df['asset_os'] = df.assets_id.apply(get_os)
+    average_data = df.groupby('asset_os').agg({'events_count': 'mean', 'crit_rate': 'mean'})
     print(average_data)
+    return info
 
 
-def process_incident_data(file_path: str) -> None:
+def process_incident_data(df: pd.DataFrame) -> None:
     """
     Process incident data: calculate event-to-duration ratio, select incidents with low ratios.
 
@@ -111,23 +145,28 @@ def process_incident_data(file_path: str) -> None:
     Returns:
     - None.
     """
-    df = pd.read_csv(file_path)
-    convert_columns_to_datetime(df)
-    df['event_duration_ratio'] = df['events_count'] / (df['end_time'] - df['start_time']).dt.total_seconds()
-    top5_lowest_ratios = df.nsmallest(5, 'event_duration_ratio')
-    median_crit_rate = df['crit_rate'].median()
-    selected_incidents = top5_lowest_ratios[top5_lowest_ratios['crit_rate'] > median_crit_rate]
-    print(selected_incidents['id'], end='\n\n\n')
-    selected_incidents_details = df.loc[df['id'].isin(selected_incidents['id'])]
-    print(selected_incidents_details)
+    df['start_time'] = pd.to_datetime(df.start_time)
+    df['end_time'] = pd.to_datetime(df.end_time)
+    df_copy = df
+    df_copy['relation'] = df.apply(lambda x: x['events_count'] / (
+        (x['end_time'] - x['start_time']).total_seconds()), axis=1)
+
+    df_copy.sort_values('relation', inplace=True)
+    top5_lowest_ratios = df.head(5)['crit_rate'].median()
+
+    selected_incidents = df_copy.loc[df.crit_rate > top5_lowest_ratios]
+    selected_incidents_details = selected_incidents.sort_values(by="crit_rate", ascending=False)
+
+    print(selected_incidents_details, end='\n\n\n')
 
 
-def correlation_table(df: pd.DataFrame) -> None:
+def correlation_table(df: pd.DataFrame, info) -> None:
     """
     Correlation table and maximum absolute correlation.
 
     Parameters:
-    - df: pd.DataFrame, the original DataFrame.
+    - df: pd.DataFrame, исходный DataFrame.
+    - info: List[Dict[str, Union[str, int, List[int]]]], информация об активах.
 
     Returns:
     - None.
@@ -145,39 +184,62 @@ def correlation_table(df: pd.DataFrame) -> None:
         "consultant": 0.55,
     }
 
-    # Create the 'user_access_levels_mean' column
-    df['user_access_levels_mean'] = df['assets_id'].apply(
-        lambda assets: sum(user_access_levels.get(user, 0) for user in assets.split(',')) / len(
-            assets.split(',')) if assets else 0
-    )
+    def get_level_access_by_asset_id(assets_id):
+        users_levels = []
+        for asset_id in assets_id:
+            result = [x for x in info if x['id'] == int(asset_id)]
+            if result:
+                user = result[0]['account_name']
+                users_levels.append(user_access_levels.get(user, 0))
+        return sum(users_levels) / len(users_levels) if users_levels else 0
 
-    # Group by incident type and calculate correlation
-    grouped_df = df.groupby('type')[['events_count', 'crit_rate', 'user_access_levels_mean']].corr()
+    # Применить к каждому элементу списка assets_id функцию literal_eval
+    df['assets_id'] = df.assets_id.apply(literal_eval)
 
-    # Display the correlation table
-    print("Correlation Table:")
-    print(grouped_df)
+    # Создать новый столбец 'user_access_levels_mean'
+    df['user_access_levels_mean'] = df.assets_id.apply(get_level_access_by_asset_id)
 
-    # Find the maximum absolute correlation with the 'user_access_levels_mean' column
-    max_correlation_with_user_access = grouped_df['user_access_levels_mean'].abs().droplevel(0).max()
-    max_correlation_column = grouped_df['user_access_levels_mean'].abs().droplevel(0).idxmax()
+    # Сгруппировать по типу инцидента и вычислить корреляции
+    corr_df = df.groupby('type')[['events_count', 'crit_rate', 'user_access_levels_mean']].corr(method='pearson')
 
-    # Display information about the maximum correlation with 'user_access_levels_mean'
-    print("\nMaximum absolute correlation with user_access_levels_mean:", max_correlation_with_user_access)
-    print("Corresponding column:", max_correlation_column)
+    # Вывести корреляционную таблицу
+    print("Таблица корреляций:")
+    print(corr_df)
+
+    # Удалить строки с корреляцией -1 и 1
+    corr_df = corr_df[
+        (corr_df['user_access_levels_mean'] != -1.0) &
+        (corr_df['user_access_levels_mean'] != 1.0)
+    ]
+
+    # Найти максимальное абсолютное значение корреляции
+    max_correlation_with_user_access = corr_df['user_access_levels_mean'].abs().max()
+
+    # Найти столбец с максимальной корреляцией
+    max_correlation_column = corr_df[
+        (corr_df['user_access_levels_mean'].abs() == max_correlation_with_user_access)
+    ]
+
+    # Вывести информацию о максимальной корреляции с 'user_access_levels_mean'
+    print("\nМаксимальная абсолютная корреляция с user_access_levels_mean:", max_correlation_with_user_access)
+    print("Соответствующий столбец:\n", max_correlation_column)
 
 
 if __name__ == '__main__':
     file_path = 'data/incidents.csv'
     df = read_data(file_path)
-    # save_info_df(df)
+    save_assets(df)
     describe_data(df)
     attack_type_distribution(df)
-    avg_events_and_crit_by_os(df)
-    process_incident_data(file_path)
+
+    info = avg_events_and_crit_by_os(df)
+    process_incident_data(df)
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_colwidth', None)
-    correlation_table(df)
+    correlation_table(df, info)
+
+
+
 
     # print(df)
